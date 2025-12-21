@@ -248,6 +248,35 @@ impl<T> Producer<T> {
             producer: self,
         })
     }
+
+    /// W
+    pub fn write_chunk_uninit2(&mut self, mut n: usize) -> WriteChunkUninit<'_, T> {
+        let tail = self.cached_tail.get();
+
+        // Check if the queue has *possibly* not enough slots.
+        if self.buffer.capacity - self.buffer.distance(self.cached_head.get(), tail) < n {
+            // Refresh the head ...
+            let head = self.buffer.head.load(Ordering::Acquire);
+            self.cached_head.set(head);
+
+            // ... and check if there *really* are not enough slots.
+            let slots = self.buffer.capacity - self.buffer.distance(head, tail);
+            if slots < n {
+                // return Err(ChunkError::TooFewSlots(slots));
+                n = slots;
+            }
+        }
+        let tail = self.buffer.collapse_position(tail);
+        let first_len = n.min(self.buffer.capacity - tail);
+        WriteChunkUninit {
+            // SAFETY: tail has been updated to a valid position.
+            first_ptr: unsafe { self.buffer.data_ptr.add(tail) },
+            first_len,
+            second_ptr: self.buffer.data_ptr,
+            second_len: n - first_len,
+            producer: self,
+        }
+    }
 }
 
 impl<T: Copy> Producer<T> {
@@ -258,12 +287,7 @@ impl<T: Copy> Producer<T> {
     /// - The second slice is the remaining part of the input buffer.
     #[inline]
     pub fn push_slice<'a>(&mut self, buf: &'a [T]) -> (&'a [T], &'a [T]) {
-        use ChunkError::TooFewSlots;
-        let mut chunk = match self.write_chunk_uninit(buf.len()) {
-            Ok(chunk) => chunk,
-            Err(TooFewSlots(0)) => return (&[], buf),
-            Err(TooFewSlots(n)) => self.write_chunk_uninit(n).unwrap(),
-        };
+        let mut chunk = self.write_chunk_uninit2(buf.len());
         let end = chunk.len();
         let (first, second) = chunk.as_mut_slices();
         let mid = first.len();
